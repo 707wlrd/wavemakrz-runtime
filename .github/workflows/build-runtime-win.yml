@@ -1,0 +1,128 @@
+name: Build Windows x64 Runtime
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+    paths:
+      - 'scripts/**'
+      - '.github/workflows/build-runtime-win.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── 1. Standalone Python 3.11 for Windows x64 ─────────────────────
+      - name: Download python-build-standalone
+        shell: pwsh
+        run: |
+          $PY_URL = "https://github.com/indygreg/python-build-standalone/releases/download/20240107/cpython-3.11.7+20240107-x86_64-pc-windows-msvc-install_only.tar.gz"
+          Write-Host "Downloading Python standalone..."
+          Invoke-WebRequest -Uri $PY_URL -OutFile "python-standalone.tar.gz"
+          New-Item -ItemType Directory -Force -Path "runtime\python" | Out-Null
+          tar -xzf python-standalone.tar.gz -C runtime\python --strip-components=1
+          & runtime\python\python.exe --version
+
+      # ── 2. pip install all AI/audio packages ──────────────────────────
+      - name: Install Python packages
+        shell: pwsh
+        run: |
+          $PYTHON = "runtime\python\python.exe"
+          & $PYTHON -m pip install --upgrade pip --quiet
+
+          Write-Host "Installing torch CPU..."
+          & $PYTHON -m pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu --quiet
+
+          Write-Host "Installing demucs..."
+          & $PYTHON -m pip install demucs --quiet
+
+          Write-Host "Installing librosa + audio stack..."
+          & $PYTHON -m pip install librosa soxr soundfile numpy scipy --quiet
+
+          Write-Host "Installing numba + llvmlite..."
+          & $PYTHON -m pip install numba llvmlite --quiet
+
+          Write-Host "Done. Verifying..."
+          & $PYTHON -c "import torch; import demucs; import librosa; import numba; print('All packages OK')"
+
+      # ── 3. ffmpeg static binary for Windows x64 ───────────────────────
+      - name: Download ffmpeg
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "runtime\bin" | Out-Null
+          $FF_URL = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
+          Write-Host "Downloading ffmpeg..."
+          Invoke-WebRequest -Uri $FF_URL -OutFile "ffmpeg.zip"
+          Expand-Archive -Path "ffmpeg.zip" -DestinationPath "ffmpeg_tmp"
+          $ffBin = Get-ChildItem -Path "ffmpeg_tmp" -Recurse -Filter "ffmpeg.exe" | Select-Object -First 1
+          Copy-Item $ffBin.FullName "runtime\bin\ffmpeg.exe"
+          & runtime\bin\ffmpeg.exe -version 2>&1 | Select-Object -First 2
+
+      # ── 4. yt-dlp for Windows ──────────────────────────────────────────
+      - name: Download yt-dlp
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe" `
+            -OutFile "runtime\bin\yt-dlp.exe"
+          & runtime\bin\yt-dlp.exe --version
+
+      # ── 5. Copy Python scripts ─────────────────────────────────────────
+      - name: Add Python scripts
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "runtime\python-scripts" | Out-Null
+          Copy-Item "scripts\analyze.py"       "runtime\python-scripts\"
+          Copy-Item "scripts\demucs_runner.py" "runtime\python-scripts\"
+          Copy-Item "scripts\loop_finder.py"   "runtime\python-scripts\"
+          Get-ChildItem "runtime\python-scripts"
+
+      # ── 6. Package into zip ────────────────────────────────────────────
+      - name: Package runtime
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "dist" | Out-Null
+          New-Item -ItemType Directory -Force -Path "package\runtime\win32-x64" | Out-Null
+          Copy-Item -Recurse "runtime\python"         "package\runtime\win32-x64\"
+          Copy-Item -Recurse "runtime\bin"            "package\runtime\win32-x64\"
+          Copy-Item -Recurse "runtime\python-scripts" "package\runtime\win32-x64\"
+          New-Item -ItemType Directory -Force -Path "package\runtime\win32-x64\models" | Out-Null
+
+          Compress-Archive -Path "package\runtime" -DestinationPath "dist\wavemakrz-runtime-win-x64.zip" -CompressionLevel Optimal
+          $size = (Get-Item "dist\wavemakrz-runtime-win-x64.zip").Length / 1MB
+          Write-Host "Size: $([math]::Round($size,1)) MB"
+
+          $hash = (Get-FileHash "dist\wavemakrz-runtime-win-x64.zip" -Algorithm SHA256).Hash.ToLower()
+          "$hash  wavemakrz-runtime-win-x64.zip" | Out-File -FilePath "dist\checksums-win.txt" -Encoding utf8
+          Get-Content "dist\checksums-win.txt"
+
+      # ── 7. Upload artifact ─────────────────────────────────────────────
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wavemakrz-runtime-win-x64
+          path: dist/
+          retention-days: 30
+
+      # ── 8. Publish to GitHub Release v2 ───────────────────────────────
+      - name: Publish to GitHub Release v2
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: pwsh
+        run: |
+          # Create v2 release if it doesn't exist yet, then upload the Windows zip
+          $exists = gh release view v2 --repo 707wlrd/wavemakrz-runtime 2>&1
+          if ($LASTEXITCODE -ne 0) {
+            gh release create v2 `
+              --title "WAVEMAKRZ Runtime v2" `
+              --notes "BPM fix: tempogram + hop=256 gives correct integer BPMs (was off by +/-1)." `
+              --repo 707wlrd/wavemakrz-runtime
+          }
+          gh release upload v2 dist\wavemakrz-runtime-win-x64.zip --clobber --repo 707wlrd/wavemakrz-runtime
+          gh release upload v2 dist\checksums-win.txt --clobber --repo 707wlrd/wavemakrz-runtime

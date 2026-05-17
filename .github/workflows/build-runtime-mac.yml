@@ -8,6 +8,9 @@ on:
       - 'scripts/**'
       - '.github/workflows/build-runtime-mac.yml'
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: macos-14   # Apple Silicon M1
@@ -157,12 +160,12 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release delete v1 --yes 2>/dev/null || true
-          git push origin :refs/tags/v1 2>/dev/null || true
+          gh release delete v2 --yes 2>/dev/null || true
+          git push origin :refs/tags/v2 2>/dev/null || true
           sleep 3
-          gh release create v1 \
+          gh release create v2 \
             dist/wavemakrz-runtime-mac-arm64.zip \
             dist/checksums.txt \
-            --title "WAVEMAKRZ Runtime v1" \
-            --notes "Bundled Python 3.11 + static ffmpeg for macOS ARM64." \
+            --title "WAVEMAKRZ Runtime v2" \
+            --notes "BPM fix: tempogram + hop=256 gives correct integer BPMs (was off by ±1)." \
             --repo 707wlrd/wavemakrz-runtime

@@ -65,21 +65,34 @@ def main():
 
         # ── BPM detection ─────────────────────────────────────────────────────
         log('Detecting BPM...')
-        # Use larger hop_length for faster processing
-        tempo_result, beat_frames = librosa.beat.beat_track(y=y, sr=sr, units='frames', hop_length=512)
-        if hasattr(tempo_result, '__len__'):
-            bpm = float(tempo_result[0])
-        else:
-            bpm = float(tempo_result)
 
-        # Skip slow plp() pass — use onset strength as fast confidence proxy
-        try:
-            onset_env = librosa.onset.onset_strength(y=y, sr=sr, hop_length=512)
-            bpm_confidence = float(min(1.0, onset_env.mean() * 2))
-        except Exception:
-            bpm_confidence = 0.7
+        # hop=256 gives 2× finer BPM resolution vs hop=512 (avoids ±1 rounding errors)
+        hop = 256
+        onset_env = librosa.onset.onset_strength(y=y, sr=sr, hop_length=hop)
 
-        log(f'BPM: {bpm:.2f} (confidence: {bpm_confidence:.2f})')
+        # Method 1: tempogram-based static BPM — more accurate than beat_track
+        # for tracks with constant tempo (electronic, pop, hip-hop, etc.)
+        static_bpm = float(librosa.feature.tempo(
+            onset_envelope=onset_env, sr=sr, hop_length=hop
+        )[0])
+
+        # Method 2: beat_track seeded with the static estimate.
+        # tightness=100 enforces strict constant-tempo assumption (no rubato).
+        tempo_bt, beat_frames = librosa.beat.beat_track(
+            onset_envelope=onset_env, sr=sr, hop_length=hop,
+            start_bpm=static_bpm, tightness=100
+        )
+        beat_bpm = float(tempo_bt[0] if hasattr(tempo_bt, '__len__') else tempo_bt)
+
+        # Weighted blend — feature.tempo is more reliable for static-tempo content
+        bpm_raw = 0.6 * static_bpm + 0.4 * beat_bpm
+
+        # Round to nearest integer: music-production BPMs are always integers.
+        # This eliminates the ±1 quantisation drift (e.g. raw=128.7 → 128, not 129).
+        bpm = float(round(bpm_raw))
+
+        bpm_confidence = float(min(1.0, onset_env.mean() * 2))
+        log(f'BPM: {bpm:.0f} (raw={bpm_raw:.2f}, static={static_bpm:.2f}, beat={beat_bpm:.2f}, conf={bpm_confidence:.2f})')
 
         # ── Key detection via chroma + Krumhansl-Schmuckler ───────────────────
         log('Detecting key...')
@@ -96,7 +109,7 @@ def main():
 
         # ── Build result ──────────────────────────────────────────────────────
         result = {
-            'bpm':               round(bpm, 2),
+            'bpm':               int(bpm),
             'key':               key_name,
             'scale':             scale,
             'duration':          round(duration, 2),
