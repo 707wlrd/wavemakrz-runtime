@@ -23,7 +23,7 @@ jobs:
       - name: Download python-build-standalone
         shell: pwsh
         run: |
-          $PY_URL = "https://github.com/indygreg/python-build-standalone/releases/download/20240107/cpython-3.11.7+20240107-x86_64-pc-windows-msvc-install_only.tar.gz"
+          $PY_URL = "https://github.com/indygreg/python-build-standalone/releases/download/20240415/cpython-3.11.9+20240415-x86_64-pc-windows-msvc-install_only.tar.gz"
           Write-Host "Downloading Python standalone..."
           Invoke-WebRequest -Uri $PY_URL -OutFile "python-standalone.tar.gz"
           New-Item -ItemType Directory -Force -Path "runtime\python" | Out-Null
