@@ -145,7 +145,8 @@ jobs:
           cd ..
 
           echo "Size: $(du -sh dist/wavemakrz-runtime-mac-arm64.zip | cut -f1)"
-          cd dist && shasum -a 256 wavemakrz-runtime-mac-arm64.zip > checksums.txt && cat checksums.txt
+          # Use platform-specific checksums filename to avoid race conditions with Windows CI
+          cd dist && shasum -a 256 wavemakrz-runtime-mac-arm64.zip > checksums-mac-arm64.txt && cat checksums-mac-arm64.txt
 
       # ── 7. Upload artifact ────────────────────────────────────────────
       - name: Upload artifact
@@ -155,17 +156,17 @@ jobs:
           path: dist/
           retention-days: 30
 
-      # ── 8. Publish to GitHub Release v1 ──────────────────────────────
-      - name: Publish to GitHub Release v1
+      # ── 8. Publish to GitHub Release v2 (clobber — never delete) ─────
+      - name: Publish to GitHub Release v2
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release delete v2 --yes 2>/dev/null || true
-          git push origin :refs/tags/v2 2>/dev/null || true
-          sleep 3
-          gh release create v2 \
-            dist/wavemakrz-runtime-mac-arm64.zip \
-            dist/checksums.txt \
-            --title "WAVEMAKRZ Runtime v2" \
-            --notes "BPM fix: tempogram + hop=256 gives correct integer BPMs (was off by ±1)." \
-            --repo 707wlrd/wavemakrz-runtime
+          # Create v2 release if it doesn't exist yet (never delete — Windows job may have uploaded too)
+          if ! gh release view v2 --repo 707wlrd/wavemakrz-runtime > /dev/null 2>&1; then
+            gh release create v2 \
+              --title "WAVEMAKRZ Runtime v2" \
+              --notes "Mac Python encodings fix + BPM tempogram + hop=256 giving exact integer BPMs." \
+              --repo 707wlrd/wavemakrz-runtime
+          fi
+          gh release upload v2 dist/wavemakrz-runtime-mac-arm64.zip --clobber --repo 707wlrd/wavemakrz-runtime
+          gh release upload v2 dist/checksums-mac-arm64.txt --clobber --repo 707wlrd/wavemakrz-runtime
