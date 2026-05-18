@@ -1,0 +1,168 @@
+name: Build Mac x64 (Intel) Runtime
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+    paths:
+      - 'scripts/**'
+      - '.github/workflows/build-runtime-mac-x64.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-13   # Intel x64 runner
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── 1. Standalone Python 3.11 for macOS x64 ───────────────────────
+      - name: Download python-build-standalone
+        run: |
+          PY_URL="https://github.com/indygreg/python-build-standalone/releases/download/20240107/cpython-3.11.7+20240107-x86_64-apple-darwin-install_only.tar.gz"
+          echo "Downloading Python standalone (x64)..."
+          curl -L "$PY_URL" -o python-standalone.tar.gz
+          mkdir -p runtime/python
+          tar -xzf python-standalone.tar.gz -C runtime/python --strip-components=1
+          runtime/python/bin/python3 --version
+          file runtime/python/bin/python3
+
+      # ── 2. pip install all AI/audio packages ──────────────────────────
+      - name: Install Python packages
+        run: |
+          PYTHON=runtime/python/bin/python3
+          $PYTHON -m pip install --upgrade pip --quiet
+
+          echo "Installing torch CPU..."
+          $PYTHON -m pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu --quiet
+
+          echo "Installing demucs..."
+          $PYTHON -m pip install demucs --quiet
+
+          echo "Installing librosa + audio stack..."
+          $PYTHON -m pip install librosa soxr soundfile numpy scipy --quiet
+
+          echo "Installing numba + llvmlite..."
+          $PYTHON -m pip install numba llvmlite --quiet
+
+          echo "Done. Verifying..."
+          $PYTHON -c "import torch; import demucs; import librosa; import numba; print('All packages OK')"
+
+      # ── 3. ffmpeg STATIC binary for macOS x64 ─────────────────────────
+      - name: Download static ffmpeg
+        run: |
+          mkdir -p runtime/bin
+
+          # evermeet.cx provides Intel (x64) static builds
+          echo "Trying evermeet.cx static ffmpeg (x64)..."
+          HTTP_CODE=$(curl -L -w "%{http_code}" -o /tmp/ffmpeg.zip \
+            "https://evermeet.cx/pub/ffmpeg/ffmpeg-7.0.zip" 2>/dev/null)
+
+          if [ "$HTTP_CODE" = "200" ] && [ -f /tmp/ffmpeg.zip ]; then
+            unzip -o /tmp/ffmpeg.zip -d /tmp/ffmpeg_static/
+            FFBIN=$(find /tmp/ffmpeg_static -name "ffmpeg" -type f | head -1)
+            if [ -n "$FFBIN" ]; then
+              cp "$FFBIN" runtime/bin/ffmpeg
+              chmod +x runtime/bin/ffmpeg
+              echo "Static ffmpeg from evermeet.cx OK"
+            fi
+          fi
+
+          # Fallback: descriptinc static build for darwin x64
+          if [ ! -f runtime/bin/ffmpeg ]; then
+            echo "Fallback: downloading static ffmpeg from GitHub releases..."
+            curl -L -o /tmp/ffmpeg_static.tar.gz \
+              "https://github.com/descriptinc/ffmpeg-ffprobe-static/releases/download/v5.1.4-beta/darwin-x64.tar.gz" \
+              2>/dev/null || true
+            if [ -f /tmp/ffmpeg_static.tar.gz ]; then
+              mkdir -p /tmp/ffmpeg_fallback
+              tar -xf /tmp/ffmpeg_static.tar.gz -C /tmp/ffmpeg_fallback/ 2>/dev/null || true
+              FFBIN=$(find /tmp/ffmpeg_fallback -name "ffmpeg" -type f | head -1)
+              [ -n "$FFBIN" ] && cp "$FFBIN" runtime/bin/ffmpeg && chmod +x runtime/bin/ffmpeg
+            fi
+          fi
+
+          # Last resort: imageio-ffmpeg
+          if [ ! -f runtime/bin/ffmpeg ]; then
+            echo "Last resort: imageio-ffmpeg static binary..."
+            runtime/python/bin/python3 -m pip install imageio-ffmpeg --quiet
+            FF=$(runtime/python/bin/python3 -c "import imageio_ffmpeg; print(imageio_ffmpeg.get_ffmpeg_exe())")
+            echo "imageio-ffmpeg path: $FF"
+            cp "$FF" runtime/bin/ffmpeg
+            chmod +x runtime/bin/ffmpeg
+          fi
+
+          echo "ffmpeg binary info:"
+          file runtime/bin/ffmpeg
+          runtime/bin/ffmpeg -version 2>&1 | head -2 || echo "WARNING: ffmpeg -version failed"
+
+      # ── 4. yt-dlp for macOS ───────────────────────────────────────────
+      - name: Download yt-dlp
+        run: |
+          # yt-dlp_macos is a universal binary (works on both x64 and arm64)
+          curl -L "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos" \
+            -o runtime/bin/yt-dlp
+          chmod +x runtime/bin/yt-dlp
+          runtime/bin/yt-dlp --version
+
+      # ── 5. Copy Python scripts ────────────────────────────────────────
+      - name: Add Python scripts
+        run: |
+          mkdir -p runtime/python-scripts
+          cp scripts/analyze.py       runtime/python-scripts/
+          cp scripts/demucs_runner.py runtime/python-scripts/
+          cp scripts/loop_finder.py   runtime/python-scripts/
+          ls -la runtime/python-scripts/
+
+      # ── 6. Package into zip ───────────────────────────────────────────
+      - name: Package runtime
+        run: |
+          mkdir -p dist
+
+          chmod +x runtime/bin/ffmpeg runtime/bin/yt-dlp
+          chmod +x runtime/python/bin/python3
+          find runtime/python/bin -type f | xargs chmod +x 2>/dev/null || true
+
+          # Wrap in expected structure: runtime/darwin-x64/...
+          mkdir -p package/runtime/darwin-x64
+          cp -Rp runtime/python         package/runtime/darwin-x64/
+          cp -Rp runtime/bin            package/runtime/darwin-x64/
+          cp -Rp runtime/python-scripts package/runtime/darwin-x64/
+          mkdir -p package/runtime/darwin-x64/models
+
+          chmod +x package/runtime/darwin-x64/bin/ffmpeg
+          chmod +x package/runtime/darwin-x64/bin/yt-dlp
+          chmod +x package/runtime/darwin-x64/python/bin/python3
+
+          echo "Packaging with zip (preserves Unix permissions)..."
+          cd package
+          zip -r9 ../dist/wavemakrz-runtime-mac-x64.zip runtime
+          cd ..
+
+          echo "Size: $(du -sh dist/wavemakrz-runtime-mac-x64.zip | cut -f1)"
+          cd dist && shasum -a 256 wavemakrz-runtime-mac-x64.zip > checksums-mac-x64.txt && cat checksums-mac-x64.txt
+
+      # ── 7. Upload artifact ────────────────────────────────────────────
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wavemakrz-runtime-mac-x64
+          path: dist/
+          retention-days: 30
+
+      # ── 8. Publish to GitHub Release v2 ──────────────────────────────
+      - name: Publish to GitHub Release v2
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if ! gh release view v2 --repo 707wlrd/wavemakrz-runtime > /dev/null 2>&1; then
+            gh release create v2 \
+              --title "WAVEMAKRZ Runtime v2" \
+              --notes "Cross-platform runtime: Windows x64, Mac arm64, Mac x64." \
+              --repo 707wlrd/wavemakrz-runtime
+          fi
+          gh release upload v2 dist/wavemakrz-runtime-mac-x64.zip --clobber --repo 707wlrd/wavemakrz-runtime
+          gh release upload v2 dist/checksums-mac-x64.txt --clobber --repo 707wlrd/wavemakrz-runtime
