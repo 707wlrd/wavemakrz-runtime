@@ -44,6 +44,10 @@ jobs:
         run: |
           PYTHON="arch -x86_64 runtime/python/bin/python3"
 
+          # Block llvmlite/numba from EVER building from source (requires LLVM not installed)
+          # PIP_ONLY_BINARY applies globally to all pip calls incl. transitive dependencies
+          export PIP_ONLY_BINARY=llvmlite,numba
+
           $PYTHON -m pip install --upgrade pip --quiet
 
           echo "Installing torch CPU (x86_64 wheels)..."
@@ -55,17 +59,12 @@ jobs:
           echo "Installing librosa + audio stack..."
           $PYTHON -m pip install librosa soxr soundfile numpy scipy --quiet
 
-          echo "Installing numba + llvmlite (pre-built wheels only, optional)..."
-          # llvmlite requires LLVM to build from source — use pinned version with x86_64 wheels
-          # If no wheel available, skip silently (librosa works without numba)
-          $PYTHON -m pip install \
-            "llvmlite==0.41.1" \
-            "numba==0.58.1" \
-            --only-binary :all: --quiet || \
-          echo "WARNING: numba/llvmlite wheel not found for x86_64 — skipping (optional)"
+          echo "Trying numba binary wheel (optional)..."
+          $PYTHON -m pip install numba llvmlite --quiet 2>/dev/null || \
+            echo "numba/llvmlite binary not available — skipping (non-fatal)"
 
           echo "Done. Verifying (x86_64 via Rosetta)..."
-          $PYTHON -c "import torch; import demucs; import librosa; print('Core packages OK — x86_64')"
+          $PYTHON -c "import torch; import demucs; import librosa; print('All packages OK — x86_64')"
           $PYTHON -c "import numba; print('numba OK')" 2>/dev/null || echo "numba not available (non-fatal)"
 
           # Confirm binaries are x86_64
