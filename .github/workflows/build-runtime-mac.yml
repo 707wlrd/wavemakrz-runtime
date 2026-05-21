@@ -154,7 +154,7 @@ jobs:
         with:
           name: wavemakrz-runtime-mac-arm64
           path: dist/
-          retention-days: 30
+          retention-days: 1
 
       # ── 8. Publish to GitHub Release v2 (clobber — never delete) ─────
       - name: Publish to GitHub Release v2
