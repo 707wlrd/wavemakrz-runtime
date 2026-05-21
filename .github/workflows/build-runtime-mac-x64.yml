@@ -13,30 +13,40 @@ permissions:
 
 jobs:
   build:
-    runs-on: macos-13   # Intel x64 runner
+    # macos-13 (Intel) est déprécié — on utilise macos-14 (ARM M1) + Rosetta
+    # pour produire de vrais binaires x86_64
+    runs-on: macos-14
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # ── 0. Enable Rosetta (needed to run x86_64 binaries on M1) ──────
+      - name: Enable Rosetta
+        run: |
+          sudo softwareupdate --install-rosetta --agree-to-license 2>/dev/null || true
+          echo "Rosetta status: OK"
+
       # ── 1. Standalone Python 3.11 for macOS x64 ───────────────────────
-      - name: Download python-build-standalone
+      - name: Download python-build-standalone (x86_64)
         run: |
           PY_URL="https://github.com/indygreg/python-build-standalone/releases/download/20240107/cpython-3.11.7+20240107-x86_64-apple-darwin-install_only.tar.gz"
-          echo "Downloading Python standalone (x64)..."
+          echo "Downloading Python standalone (x86_64)..."
           curl -L "$PY_URL" -o python-standalone.tar.gz
           mkdir -p runtime/python
           tar -xzf python-standalone.tar.gz -C runtime/python --strip-components=1
-          runtime/python/bin/python3 --version
           file runtime/python/bin/python3
+          # Run via Rosetta to verify x86_64 binary works
+          arch -x86_64 runtime/python/bin/python3 --version
 
-      # ── 2. pip install all AI/audio packages ──────────────────────────
+      # ── 2. pip install all AI/audio packages (via Rosetta x86_64) ────
       - name: Install Python packages
         run: |
-          PYTHON=runtime/python/bin/python3
+          PYTHON="arch -x86_64 runtime/python/bin/python3"
+
           $PYTHON -m pip install --upgrade pip --quiet
 
-          echo "Installing torch CPU..."
+          echo "Installing torch CPU (x86_64 wheels)..."
           $PYTHON -m pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu --quiet
 
           echo "Installing demucs..."
@@ -48,15 +58,17 @@ jobs:
           echo "Installing numba + llvmlite..."
           $PYTHON -m pip install numba llvmlite --quiet
 
-          echo "Done. Verifying..."
-          $PYTHON -c "import torch; import demucs; import librosa; import numba; print('All packages OK')"
+          echo "Done. Verifying (x86_64 via Rosetta)..."
+          $PYTHON -c "import torch; import demucs; import librosa; import numba; print('All packages OK — x86_64')"
+
+          # Confirm binaries are x86_64
+          file runtime/python/lib/python3.11/site-packages/torch/lib/libtorch.dylib 2>/dev/null | head -1 || true
 
       # ── 3. ffmpeg STATIC binary for macOS x64 ─────────────────────────
-      - name: Download static ffmpeg
+      - name: Download static ffmpeg (x86_64)
         run: |
           mkdir -p runtime/bin
 
-          # evermeet.cx provides Intel (x64) static builds
           echo "Trying evermeet.cx static ffmpeg (x64)..."
           HTTP_CODE=$(curl -L -w "%{http_code}" -o /tmp/ffmpeg.zip \
             "https://evermeet.cx/pub/ffmpeg/ffmpeg-7.0.zip" 2>/dev/null)
@@ -67,13 +79,14 @@ jobs:
             if [ -n "$FFBIN" ]; then
               cp "$FFBIN" runtime/bin/ffmpeg
               chmod +x runtime/bin/ffmpeg
-              echo "Static ffmpeg from evermeet.cx OK"
+              file runtime/bin/ffmpeg
+              echo "Static ffmpeg OK"
             fi
           fi
 
-          # Fallback: descriptinc static build for darwin x64
+          # Fallback: descriptinc static build
           if [ ! -f runtime/bin/ffmpeg ]; then
-            echo "Fallback: downloading static ffmpeg from GitHub releases..."
+            echo "Fallback: descriptinc static ffmpeg darwin-x64..."
             curl -L -o /tmp/ffmpeg_static.tar.gz \
               "https://github.com/descriptinc/ffmpeg-ffprobe-static/releases/download/v5.1.4-beta/darwin-x64.tar.gz" \
               2>/dev/null || true
@@ -85,27 +98,28 @@ jobs:
             fi
           fi
 
-          # Last resort: imageio-ffmpeg
+          # Last resort: imageio-ffmpeg (x86_64 via Rosetta pip)
           if [ ! -f runtime/bin/ffmpeg ]; then
-            echo "Last resort: imageio-ffmpeg static binary..."
-            runtime/python/bin/python3 -m pip install imageio-ffmpeg --quiet
-            FF=$(runtime/python/bin/python3 -c "import imageio_ffmpeg; print(imageio_ffmpeg.get_ffmpeg_exe())")
-            echo "imageio-ffmpeg path: $FF"
+            echo "Last resort: imageio-ffmpeg..."
+            arch -x86_64 runtime/python/bin/python3 -m pip install imageio-ffmpeg --quiet
+            FF=$(arch -x86_64 runtime/python/bin/python3 -c "import imageio_ffmpeg; print(imageio_ffmpeg.get_ffmpeg_exe())")
             cp "$FF" runtime/bin/ffmpeg
             chmod +x runtime/bin/ffmpeg
           fi
 
           echo "ffmpeg binary info:"
           file runtime/bin/ffmpeg
-          runtime/bin/ffmpeg -version 2>&1 | head -2 || echo "WARNING: ffmpeg -version failed"
+          arch -x86_64 runtime/bin/ffmpeg -version 2>&1 | head -2 || \
+            runtime/bin/ffmpeg -version 2>&1 | head -2 || \
+            echo "WARNING: ffmpeg -version failed"
 
-      # ── 4. yt-dlp for macOS ───────────────────────────────────────────
+      # ── 4. yt-dlp (universal binary) ─────────────────────────────────
       - name: Download yt-dlp
         run: |
-          # yt-dlp_macos is a universal binary (works on both x64 and arm64)
           curl -L "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos" \
             -o runtime/bin/yt-dlp
           chmod +x runtime/bin/yt-dlp
+          file runtime/bin/yt-dlp
           runtime/bin/yt-dlp --version
 
       # ── 5. Copy Python scripts ────────────────────────────────────────
@@ -126,7 +140,6 @@ jobs:
           chmod +x runtime/python/bin/python3
           find runtime/python/bin -type f | xargs chmod +x 2>/dev/null || true
 
-          # Wrap in expected structure: runtime/darwin-x64/...
           mkdir -p package/runtime/darwin-x64
           cp -Rp runtime/python         package/runtime/darwin-x64/
           cp -Rp runtime/bin            package/runtime/darwin-x64/
@@ -137,7 +150,7 @@ jobs:
           chmod +x package/runtime/darwin-x64/bin/yt-dlp
           chmod +x package/runtime/darwin-x64/python/bin/python3
 
-          echo "Packaging with zip (preserves Unix permissions)..."
+          echo "Packaging..."
           cd package
           zip -r9 ../dist/wavemakrz-runtime-mac-x64.zip runtime
           cd ..
